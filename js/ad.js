@@ -1004,7 +1004,12 @@
           return obj;
         });
 
-        console.log("Datos listos desde Google Sheets:", j);
+        // Filtrar solo los registros que dicen TRUE en Permitido
+        j = j.filter(function(item) {
+          return item["Permitido"] && String(item["Permitido"]).toUpperCase() === "TRUE";
+        });
+
+        console.log("Datos listos desde Google Sheets (solo permitidos):", j);
         
         if (j.length > 0) {
           if (res.rotateInterval) clearInterval(res.rotateInterval);
