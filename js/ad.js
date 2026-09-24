@@ -273,9 +273,9 @@
         el.muted = true;
         try { el.defaultMuted = true; } catch (e0b) {}
         el.autoplay = true;
-        var _doLoop = items.length === 1 || (it.condition && it.condition.type !== 'always');
-        el.loop = !!_doLoop;
-        if (_doLoop) el.setAttribute('loop', '');
+        // El usuario solicitó que el video de fondo NO se reinicie (sin loop)
+        var _doLoop = false;
+        el.loop = false;
         el.setAttribute('muted', '');
         el.setAttribute('autoplay', '');
         el.setAttribute('playsinline', '');
@@ -717,7 +717,19 @@
     var inner = r.inner;
     switch (cfg.type) {
       case 'text':
-        inner.innerHTML = esc(fillTokens(cfg.text)).split('\n').join('<br>');
+        // Quitamos esc() para permitir usar etiquetas como <span color="...">
+        var html = fillTokens(cfg.text).split('\n').join('<br>');
+        if (cfg.valign === 'center') {
+          inner.style.display = 'flex';
+          inner.style.alignItems = 'center';
+          if (cfg.align === 'center') inner.style.justifyContent = 'center';
+          else if (cfg.align === 'right') inner.style.justifyContent = 'flex-end';
+          else inner.style.justifyContent = 'flex-start';
+          inner.innerHTML = '<div style="width:100%; text-align:' + (cfg.align || 'left') + '">' + html + '</div>';
+        } else {
+          inner.style.display = 'block';
+          inner.innerHTML = html;
+        }
         break;
       case 'clock':
         inner.textContent = buildClock(cfg);
@@ -736,10 +748,14 @@
           var img = document.createElement('img');
           img.style.width = '100%';
           img.style.height = '100%';
-          img.style.objectFit = 'contain';
-          img.src = cfg.imageSrc || '';
+          img.style.objectFit = cfg.objectFit || 'contain';
           inner.appendChild(img);
           r.domImg = img;
+        }
+        var newSrc = fillTokens(cfg.imageSrc || '');
+        // Actualizar solo si cambia para evitar parpadeos
+        if (r.domImg.getAttribute('src') !== newSrc) {
+          r.domImg.setAttribute('src', newSrc);
         }
         break;
     }
@@ -747,8 +763,8 @@
 
   function renderEl(r) {
     var cfg = r.cfg;
-    var bgSynced = cfg.condition && cfg.condition.type === 'background';
-    var fade = bgSynced && C.backgroundFade && (C.transition || 0.8) > 0;
+    // El usuario solicitó que todos los elementos (fotos, textos) tengan animación de aparición
+    var fade = true; 
     var visible = cfg.enabled !== false && condPass(cfg.condition, r.cd);
     if (!visible) {
       if (fade) {
@@ -951,21 +967,70 @@
       applyApiFields(res, cached);
       tick();
     }
-    var xhr = new XMLHttpRequest();
-    xhr.open('GET', res.url, true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState !== 4) return;
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          var j = JSON.parse(xhr.responseText);
+    fetch(res.url)
+      .then(function(response) {
+        if (!response.ok) throw new Error("Error HTTP " + response.status);
+        return response.text();
+      })
+      .then(function(text) {
+        // Limpiamos el texto que devuelve Google (/*O_o*/ y funciones)
+        var jsonText = text.substring(text.indexOf('{'), text.lastIndexOf('}') + 1);
+        var rawJson = JSON.parse(jsonText);
+        
+        // Mapeamos los datos para que queden como un array de objetos (igual que antes)
+        var j = rawJson.table.rows.map(function(row) {
+          var obj = {};
+          rawJson.table.cols.forEach(function(col, i) {
+            var cell = row.c[i];
+            var val = cell ? (cell.f !== undefined ? cell.f : (cell.v !== null ? cell.v : "")) : "";
+            
+            // Convertimos enlaces de Drive a enlaces de imagen directa usando el CDN de Google
+            if (col.label === "Foto" && typeof val === "string" && val.indexOf("drive.google.com") !== -1) {
+              var match = val.match(/id=([^&]+)/) || val.match(/file\/d\/([^\/]+)/);
+              if (match && match[1]) {
+                val = "https://lh3.googleusercontent.com/d/" + match[1];
+              }
+            }
+            
+            obj[col.label] = val;
+
+            // Separamos Nombre y Cargo
+            if (col.label && col.label.indexOf("Nombre y cargo") !== -1 && typeof val === "string") {
+              var partes = val.split("-");
+              obj["SoloNombre"] = partes[0] ? partes[0].trim() : val;
+              obj["SoloCargo"] = partes[1] ? "- " + partes[1].trim() : "";
+            }
+          });
+          return obj;
+        });
+
+        console.log("Datos listos desde Google Sheets:", j);
+        
+        if (j.length > 0) {
+          if (res.rotateInterval) clearInterval(res.rotateInterval);
+          
+          // Recuperar el último índice mostrado desde localStorage
+          var savedIdx = parseInt(localStorage.getItem('alac_rotate_idx_' + res.id) || '0', 10);
+          var baseIdx = savedIdx % j.length;
+          
+          // Preparar el siguiente índice para la próxima vez que se abra la página
+          localStorage.setItem('alac_rotate_idx_' + res.id, (baseIdx + 1).toString());
+
+          var rotateIdx = baseIdx;
+          
+          var fakeArray = [ j[rotateIdx] ];
+          applyApiFields(res, fakeArray);
+          apiCacheSet(res, fakeArray);
+          tick();
+        } else {
           applyApiFields(res, j);
           apiCacheSet(res, j);
           tick();
-        } catch (e) {}
-      }
-    };
-    xhr.onerror = function () {};
-    xhr.send();
+        }
+      })
+      .catch(function(e) {
+        console.log("Error al consultar API:", e);
+      });
   }
 
   function fetchApis() {
@@ -1012,7 +1077,7 @@
     fetchApis();
     setInterval(tick, 1000);
     setInterval(fetchWeather, Math.max(1, (C.weather && C.weather.refresh) ? C.weather.refresh : 15) * 60000);
-    setInterval(fetchApis, Math.max(1, C.apiRefreshMin || 1) * 1000);
+    // setInterval(fetchApis, Math.max(1, C.apiRefreshMin || 1) * 1000);
     window.addEventListener('resize', function () {
       scaleStage();
       if (typeof onMediaResizeBg === 'function') onMediaResizeBg();
